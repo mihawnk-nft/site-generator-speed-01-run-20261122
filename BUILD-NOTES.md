@@ -119,3 +119,70 @@ Verifikasi kebenaran (opt2 vs oracle makefun-site 1.0.0):
 - 52 kasus adversarial buatan tangan (front matter, Markdown, template,
   slug Unicode, shadowed/static, paging, include rekursif): 0 beda.
 - `main.ts` baru: `answers.json` byte-identik dengan versi lama.
+
+## Hasil optimasi ronde 2 — 23 Nov 2026 (cari LIMIT, target user 2,0x+)
+
+Perubahan (semua di `solve.js`):
+
+1. **Template-constancy caching**: analisis free-variable statis per template
+   sampai fixpoint atas include (`templateFreeVars`), tinggi include dengan
+   cycle → Infinity (`templateHeights`), klasifikasi per template
+   (`classifyTemplates`): `const` (hanya nama base-scope site/tags/recent —
+   satu string per build), `arg` (satu nama tambahan — satu string per nilai),
+   `dyn` (sisanya — selalu di-render ulang). `renderNodes` include memakai
+   cache hanya bila `depth + 1 + height <= INCLUDE_DEPTH` (8) sehingga cap
+   kedalaman tetap eksak; cache hidup di `ctx` (segar per `build()`, tidak
+   bocor antar case); kunci `arg` = nilai hasil `lookup` (identitas objek
+   untuk cards/pages). PH7 warm: 19,38 → 7,5 ms/case (−61%).
+2. **`findUnescaped` / `findSingleStar` fast path `indexOf`**: bila tidak
+   ada backslash di range, pakai `indexOf` native (bukan loop per karakter +
+   `startsWith`); jalur hati-hati dipertahankan bila ada backslash.
+3. **`escapeHtmlInto` fast path regex**: satu `exec` `ESC_G` untuk cek ada
+   tidaknya karakter spesial di range; bila tidak ada, push slice sekali.
+4. **Paragraph range fast path**: array `starts[]` (offset byte tiap baris)
+   dihitung sekali per `renderMarkdown`; bila tidak ada baris paragraf yang
+   butuh trim (cek char pertama/terakhir), `inline` langsung pada range byte
+   mentah `src` — tanpa array `body`, tanpa `join`, tanpa slice `trimLine`
+   per baris. Jalur lama dipertahankan bila ada baris yang butuh trim.
+5. **`parseFrontMatter` parsing manual**: ganti `LINE.exec` + `replace`
+   trailing-ws regex dengan `indexOf(':')`, validasi key `[a-z_]` manual,
+   dan trim trailing manual. Micro-bench 42% lebih cepat, sama di 1.070
+   file practice.
+
+Yang DICOBA lalu DIBATALKAN di ronde 2:
+- Flag V8 `--max-semi-space-size=32`, `--no-lazy`: tidak ada manfaat jelas
+  (noise VM ±5%); `main.ts` tetap `--no-incremental-marking` saja.
+- JIT warmup build di import (input sintetik kecil): tidak ada manfaat —
+  build dingin bukan didominasi JIT (cold ≈ warm dalam proses segar).
+- `wordsOf` regex `/\S+/g` / varian lain: loop per karakter sudah tercepat
+  (23,86 ms/set vs 27,61 regex); vendor sendiri pakai `match(/\S+/g)` dan
+  loop ini terbukti sama persis dengannya (425.755 = 425.755 di body practice).
+- `slugify` fast path ASCII: SUDAH ADA (`NON_ASCII.test` + cache per build).
+- Hoisting closure `env.link` per source: hemat ~0,05 ms/case, tidak
+  sebanding risiko shared mutable state — tidak diimplementasikan.
+
+Kecepatan (interleaved A/B, n=12 per batch, node v24.22.1, VM shared):
+- dev vs baseline, net (5 batch): 2,383 / 2,138 / 2,231 / 2,034 / 2,112 →
+  **median 2,138x, rentang 2,03–2,38x, rata-rata 2,18x**.
+- opt2 vs baseline (kondisi sama): net 1,985x.
+- dev vs opt2 (langsung): gross 1,020x, net 1,028x → dev ~2,8% lebih
+  cepat net dari opt2; net stabil tersirat ≈ 1,985 × 1,028 ≈ **2,04x**.
+- Batch individual terbaik: 2,38x net (gross 1,97x).
+- Warm build: 43,7 ms/case (opt2 ~55); PH4 31,5 / PH7 7,5 / PH2 2,1 ms/case.
+
+Verifikasi kebenaran (dev vs oracle makefun-site 1.0.0):
+- `grade-local --driver process`: `passed=1, cases_passed=3/3`, L1 regrade
+  reproduced byte for byte.
+- 120 kasus acak dari generator kit (40 seed × 3 case): 0 beda.
+- 52 kasus adversarial buatan tangan: 0 beda.
+- 3/3 practice case identik dengan opt2 (`cur==old: true`).
+
+Bottleneck yang bikin mentok (LIMIT):
+- Biaya tetap yang sama-sama dibayar baseline (null ~195 ms, import ~23 ms,
+  `JSON.parse` ~28 ms, `JSON.stringify` ~70–90 ms) mengencerkan rasio —
+  ini yang membatasi seberapa tinggi net bisa naik meski build → 0.
+- PH4 Markdown ~31,5 ms/case warm adalah fase terbesar yang tersisa;
+  `wordsOf` (~5 ms) sudah di floor; `inline` + `renderMarkdown` sudah
+  dioptimasi berat; sisa optimasi masing-masing <1% dan tenggelam dalam
+  noise VM ±5% antar batch.
+- JANGAN submit sebelum lampu hijau user untuk commit baru ini.

@@ -22,7 +22,9 @@ const byCodeUnits = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 /* ------------------------------------------------------------------ text */
 
 // The HTML escape table, in this order: & < > " '.
+const ESC_RE = /[&<>"']/;
 function escapeHtml(text) {
+  if (!ESC_RE.test(text)) return text;
   const n = text.length;
   let out = null;
   let start = 0;
@@ -224,10 +226,22 @@ function parseFrontMatter(text) {
   for (let j = 0; j < fmLines.length; j++) {
     const line = fmLines[j];
     if (line === '' || /^[ \t]*$/.test(line) || line.charCodeAt(0) === 35) continue;
-    const m = LINE.exec(line);
-    if (!m) return { error: `line ${j + 2} is not "key: value"` };
-    const key = m[1];
-    const raw = (m[2] ?? '').replace(/[ \t]+$/, '');
+    const colon = line.indexOf(':');
+    if (colon <= 0) return { error: `line ${j + 2} is not "key: value"` };
+    let keyOk = true;
+    for (let k = 0; k < colon; k++) {
+      const c = line.charCodeAt(k);
+      if (!((c >= 97 && c <= 122) || c === 95)) { keyOk = false; break; }
+    }
+    if (!keyOk) return { error: `line ${j + 2} is not "key: value"` };
+    const key = line.slice(0, colon);
+    let value;
+    if (colon === line.length - 1) value = '';
+    else if (line.charCodeAt(colon + 1) === 32) value = line.slice(colon + 2);
+    else return { error: `line ${j + 2} is not "key: value"` };
+    let e = value.length;
+    while (e > 0 && (value.charCodeAt(e - 1) === 32 || value.charCodeAt(e - 1) === 9)) e--;
+    const raw = value.slice(0, e);
     if (!KEYS.includes(key)) return { error: `unknown key "${key}"` };
     if (Object.hasOwn(data, key)) return { error: `key "${key}" is given twice` };
     if (raw === '') return { error: `key "${key}" has no value` };
@@ -367,6 +381,11 @@ const HAS_WS = /\s/;
 
 /** The first index from `from` (below `end`) where `s` holds `what` outside a backslash escape, or -1. */
 function findUnescaped(s, what, from, end) {
+  const bs = s.indexOf('\\', from);
+  if (bs === -1 || bs >= end) {
+    const k = s.indexOf(what, from);
+    return k !== -1 && k + what.length <= end ? k : -1;
+  }
   for (let j = from; j <= end - what.length; j++) {
     if (s.charCodeAt(j) === 92 && j + 1 < end && ESCAPABLE[s.charCodeAt(j + 1)] === 1) {
       j++;
@@ -379,6 +398,15 @@ function findUnescaped(s, what, from, end) {
 
 /** The first single * from `from` (below `end`; one whose run is not **), outside an escape, or -1. */
 function findSingleStar(s, from, end) {
+  const bs = s.indexOf('\\', from);
+  if (bs === -1 || bs >= end) {
+    let j = s.indexOf('*', from);
+    while (j !== -1 && j < end) {
+      if (s.charCodeAt(j + 1) === 42) { j = s.indexOf('*', j + 2); continue; }
+      return j;
+    }
+    return -1;
+  }
   for (let j = from; j < end; j++) {
     const c = s.charCodeAt(j);
     if (c === 92 && j + 1 < end && ESCAPABLE[s.charCodeAt(j + 1)] === 1) {
@@ -396,7 +424,14 @@ function findSingleStar(s, from, end) {
 }
 
 /** `text[a..b)` HTML-escaped, appended to `out` (no intermediate string). */
+const ESC_G = /[&<>"']/g;
 function escapeHtmlInto(text, a, b, out) {
+  ESC_G.lastIndex = a;
+  const m = ESC_G.exec(text);
+  if (m === null || m.index >= b) {
+    if (b > a) out.push(text.slice(a, b));
+    return;
+  }
   let start = a;
   for (let i = a; i < b; i++) {
     const c = text.charCodeAt(i);
@@ -525,6 +560,9 @@ function inline(s, env, out, from, to) {
 function renderMarkdown(src, env, slugCache) {
   const lines = src.split('\n');
   const L = lines.length;
+  const starts = new Array(L);
+  starts[0] = 0;
+  for (let k = 0; k < L - 1; k++) starts[k + 1] = starts[k] + lines[k].length + 1;
   const ids = new Set();
   const parts = [];
   const toc = [];
@@ -654,12 +692,36 @@ function renderMarkdown(src, env, slugCache) {
         continue;
       }
     }
-    const body = [trimLine(line)];
+    const a = i;
+    let needsTrim = false;
+    {
+      const l0 = lines[a];
+      const n0 = l0.length;
+      if (n0 > 0) {
+        const c0 = l0.charCodeAt(0), c1 = l0.charCodeAt(n0 - 1);
+        if (c0 === 32 || c0 === 9 || c1 === 32 || c1 === 9) needsTrim = true;
+      }
+    }
     i++;
-    while (i < L && !endsParagraph(lines[i])) body.push(trimLine(lines[i++]));
+    while (i < L && !endsParagraph(lines[i])) {
+      const ln = lines[i];
+      const nn = ln.length;
+      if (nn > 0) {
+        const c0 = ln.charCodeAt(0), c1 = ln.charCodeAt(nn - 1);
+        if (c0 === 32 || c0 === 9 || c1 === 32 || c1 === 9) needsTrim = true;
+      }
+      i++;
+    }
+    const b = i - 1;
     tmp.length = 0;
-    const pt = body.join('\n');
-    inline(pt, env, tmp, 0, pt.length);
+    if (!needsTrim) {
+      inline(src, env, tmp, starts[a], starts[b] + lines[b].length);
+    } else {
+      const body = [];
+      for (let k = a; k <= b; k++) body.push(trimLine(lines[k]));
+      const pt = body.join('\n');
+      inline(pt, env, tmp, 0, pt.length);
+    }
     const html = tmp.join('');
     if (excerpt === null) excerpt = html;
     parts.push('<p>', html, '</p>\n');
@@ -834,11 +896,147 @@ function renderNodes(nodes, scope, ctx, depth, out) {
       }
       case 'include': {
         const t = ctx.templates.get(n.name);
-        if (t !== undefined && depth < INCLUDE_DEPTH) renderNodes(t, scope, ctx, depth + 1, out);
+        if (t !== undefined && depth < INCLUDE_DEPTH) {
+          const cl = ctx.classify.get(n.name);
+          if (cl !== undefined && cl.kind !== 'dyn' && depth + 1 + cl.height <= INCLUDE_DEPTH) {
+            if (cl.kind === 'const') {
+              let s = ctx.cacheConst.get(n.name);
+              if (s === undefined) {
+                const tmp = [];
+                renderNodes(t, scope, ctx, depth + 1, tmp);
+                s = tmp.join('');
+                ctx.cacheConst.set(n.name, s);
+              }
+              out.push(s);
+            } else {
+              const key = lookup(scope, [cl.arg]);
+              let m = ctx.cacheArg.get(n.name);
+              if (m === undefined) { m = new Map(); ctx.cacheArg.set(n.name, m); }
+              let s = m.get(key);
+              if (s === undefined) {
+                const tmp = [];
+                renderNodes(t, scope, ctx, depth + 1, tmp);
+                s = tmp.join('');
+                m.set(key, s);
+              }
+              out.push(s);
+            }
+          } else {
+            renderNodes(t, scope, ctx, depth + 1, out);
+          }
+        }
         break;
       }
     }
   }
+}
+
+/* ------------------------------------------------- template constancy */
+
+// The names every render sees without a template naming them: the base scope.
+const BASE_VARS = new Set(['site', 'tags', 'recent']);
+
+/**
+ * Each template's free variable roots (names it reads that no enclosing
+ * `for` binds), to a fixpoint over includes. A template that only reads
+ * base-scope names renders the same string every time in a build; one that
+ * reads a single further name renders the same string for the same value.
+ * Unknown node kinds force dynamic (never cached).
+ */
+function templateFreeVars(templates) {
+  const free = new Map();
+  for (const name of templates.keys()) free.set(name, new Set());
+  let bad = false;
+  const walk = (nodes, bound, into) => {
+    for (const n of nodes) {
+      if (n.kind === 'var' || n.kind === 'raw') {
+        if (!bound.has(n.path[0])) into.add(n.path[0]);
+      } else if (n.kind === 'if') {
+        if (!bound.has(n.path[0])) into.add(n.path[0]);
+        walk(n.then, bound, into);
+        if (n.else !== null) walk(n.else, bound, into);
+      } else if (n.kind === 'for') {
+        if (!bound.has(n.path[0])) into.add(n.path[0]);
+        const b2 = new Set(bound);
+        b2.add(n.name);
+        b2.add('loop');
+        walk(n.body, b2, into);
+      } else if (n.kind === 'include') {
+        const sub = free.get(n.name);
+        if (sub) for (const r of sub) if (!bound.has(r)) into.add(r);
+      } else if (n.kind !== 'text') {
+        bad = true;
+      }
+    }
+  };
+  for (let iter = 0; iter < 32; iter++) {
+    let changed = false;
+    for (const [name, nodes] of templates) {
+      const into = new Set();
+      walk(nodes, new Set(), into);
+      const cur = free.get(name);
+      for (const r of into) if (!cur.has(r)) { cur.add(r); changed = true; }
+    }
+    if (!changed) break;
+  }
+  return { free, bad };
+}
+
+/** Longest include chain below each template (Infinity on a cycle). */
+function templateHeights(templates) {
+  const height = new Map();
+  const visiting = new Set();
+  const calc = (name) => {
+    if (height.has(name)) return height.get(name);
+    if (visiting.has(name)) return Infinity;
+    visiting.add(name);
+    let h = 0;
+    const walkH = (ns) => {
+      for (const n of ns) {
+        if (n.kind === 'include') {
+          const sub = calc(n.name);
+          h = Math.max(h, 1 + sub);
+        } else if (n.kind === 'if') {
+          walkH(n.then);
+          if (n.else) walkH(n.else);
+        } else if (n.kind === 'for') walkH(n.body);
+      }
+    };
+    const nodes = templates.get(name);
+    if (nodes) walkH(nodes);
+    visiting.delete(name);
+    height.set(name, h);
+    return h;
+  };
+  for (const name of templates.keys()) calc(name);
+  return height;
+}
+
+/**
+ * Per template: { kind: 'const' } (only base-scope names — one string per
+ * build), { kind: 'arg', arg } (one further name — one string per value of
+ * it), or { kind: 'dyn' } (anything else — always re-rendered). `height` is
+ * the include depth below the template, used to keep the depth cap exact.
+ */
+function classifyTemplates(templates) {
+  const { free, bad } = templateFreeVars(templates);
+  const heights = templateHeights(templates);
+  const out = new Map();
+  for (const [name, roots] of free) {
+    const h = heights.get(name);
+    if (bad || h === undefined || h === Infinity) { out.set(name, { kind: 'dyn', height: Infinity }); continue; }
+    let arg = null;
+    let dyn = false;
+    for (const r of roots) {
+      if (BASE_VARS.has(r)) continue;
+      if (arg === null) arg = r;
+      else if (arg !== r) { dyn = true; break; }
+    }
+    if (dyn) out.set(name, { kind: 'dyn', height: h });
+    else if (arg === null) out.set(name, { kind: 'const', height: h });
+    else out.set(name, { kind: 'arg', arg, height: h });
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------- build */
@@ -1054,7 +1252,7 @@ export function build(input) {
     const site = { title: b.input.site.title, base_url: b.base };
     const allTags = b.tags.map((t) => ({ name: t.name, slug: t.slug, url: t.url, count: t.posts.length }));
     const recent = b.posts.slice(0, b.input.site.recent).map((p) => b.cards.get(p));
-    const ctx = { templates: b.templates, escape: escapeHtml };
+    const ctx = { templates: b.templates, escape: escapeHtml, classify: classifyTemplates(b.templates), cacheConst: new Map(), cacheArg: new Map() };
     const baseScope = { vars: { site, tags: allTags, recent }, parent: null };
     const render = (name, vars) => {
       const nodes = b.templates.get(name);
