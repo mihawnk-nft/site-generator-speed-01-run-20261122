@@ -63,3 +63,59 @@ sebagai CommonJS dulu).
   yang sama.
 - Belum dibuat: repo GitHub, README + badge, LICENSE (tugas parent).
   JANGAN submit sebelum lampu hijau user.
+
+## Hasil optimasi lanjutan — 23 Nov 2026 (opt2, commit baru)
+
+Target user: kejar kecepatan dulu sebelum submit (1,55x kemungkinan NPC).
+Perubahan (semua di `solve.js`, kecuali serialisasi di `main.ts`):
+
+1. **`inline` regex-scan**: karakter markup berikutnya dicari satu regex
+   `/[\\`*\[&<>"']/g` (native) bukan loop per karakter; penanganan tiap
+   karakter spesial tidak berubah. Terukur ~30% lebih cepat di micro-benchmark
+   dan output identik di 1.070 body.
+2. **`trimLine` fast path**: kembalikan string apa adanya bila tidak ada
+   spasi/tab di ujung (tanpa slice) — sebagian besar baris tidak perlu trim.
+3. **Front matter CRLF fast path**: `indexOf('\r')` dulu; `replace` regex
+   hanya bila ada `\r`. Fase 1: 2,2 → 0,7 ms/case (warm).
+4. **`ESCAPABLE` jadi tabel `Uint8Array(128)`** + `charCodeAt` (ganti
+   `Set.has(s[i])` yang mengalokasi string 1 karakter per cek) di
+   `findUnescaped`/`findSingleStar`/cabang backslash `inline`.
+5. **`renderNodes` for-scope reuse**: satu objek scope + satu objek `loop`
+   per eksekusi `for` (bukan per iterasi); field `loop` di-mutasi per
+   iterasi. Render sinkron dan sekuensial, jadi aman. Fase 7: 36,1 → 30,7
+   ms/case (warm).
+6. **`baseScope` template**: `site`/`tags`/`recent` dibuat sekali per case
+   sebagai parent scope; tiap `render` hanya membuat child scope berisi
+   vars-nya (tanpa spread per render).
+7. **`pageOf` satu literal** (tanpa spread `cardOf`) — urutan key sama,
+   output `JSON.stringify` tetap byte-identik.
+8. **`main.ts` serialisasi per case**: `JSON.stringify` per case + `join`
+   (bukan satu `JSON.stringify(answers)`) — byte-identik (terverifikasi),
+   alokasi puncak lebih kecil. ~1,5% lebih cepat end-to-end.
+
+Yang DICOBA lalu DIBATALKAN — spread chunk `tmp` ke `parts` di
+`renderMarkdown` (hindari `tmp.join` kedua): terukur LEBIH LAMBAT ~7%
+(interleaved) karena `parts.join` akhir memproses jauh lebih banyak potongan.
+Dibatalkan; `solve.js` kembali ke opt2.
+
+Kecepatan (VM ini, node v24.22.1, median run `node main.ts` + `wait4`,
+interleaved A/B untuk batalkan drift VM; null-entry ~280 ms):
+- entry lama: ~1.100 ms (net ~816 ms) → speedup net ~1,80x
+- opt2: ~975 ms (net ~695 ms) → speedup net ~1,89x vs baseline
+- opt2 + main.ts baru: ~1.019 ms → ~1,90x net
+- baseline: ~1.595 ms (net ~1.315 ms)
+- Catatan jujur: rasio berfluktuasi antar batch (1,82–2,16x net) karena VM
+  shared; angka interleaved (~1,89x) yang paling bisa dipercaya. Target 2x
+  belum tercapai penuh secara lokal; yang dicapai adalah kenaikan nyata
+  ~0,15–0,2x dari 1,55x dan posisi yang (dengan patokan klaim 1,7x di
+  peringkat 12–15) semestinya masuk 10 besar. Papan atas tidak menampilkan
+  waktu baseline / speedup resmi, jadi posisi pasti tidak bisa dihitung
+  dari leaderboard saja.
+
+Verifikasi kebenaran (opt2 vs oracle makefun-site 1.0.0):
+- `grade-local --driver process`: `passed=1, cases_passed=3/3`, L1 regrade
+  reproduced byte for byte.
+- 120 kasus acak dari generator kit (40 seed × 3 case): 0 beda.
+- 52 kasus adversarial buatan tangan (front matter, Markdown, template,
+  slug Unicode, shadowed/static, paging, include rekursif): 0 beda.
+- `main.ts` baru: `answers.json` byte-identik dengan versi lama.

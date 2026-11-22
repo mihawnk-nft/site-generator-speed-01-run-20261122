@@ -252,8 +252,13 @@ function isBlank(line) {
 }
 
 function trimLine(line) {
+  const n = line.length;
+  if (n === 0) return line;
+  const c0 = line.charCodeAt(0);
+  const c1 = line.charCodeAt(n - 1);
+  if (c0 !== 32 && c0 !== 9 && c1 !== 32 && c1 !== 9) return line;
   let a = 0;
-  let b = line.length;
+  let b = n;
   while (a < b && (line.charCodeAt(a) === 32 || line.charCodeAt(a) === 9)) a++;
   while (b > a && (line.charCodeAt(b - 1) === 32 || line.charCodeAt(b - 1) === 9)) b--;
   return line.slice(a, b);
@@ -356,13 +361,14 @@ function isContinued(line) {
 }
 
 /** The characters a backslash escapes. */
-const ESCAPABLE = new Set(['\\', '`', '*', '_', '[', ']', '(', ')', '#', '+', '-', '.', '!', '>']);
+const ESCAPABLE = new Uint8Array(128);
+for (const ch of '\\` *_[]()#+-.!>') ESCAPABLE[ch.charCodeAt(0)] = 1;
 const HAS_WS = /\s/;
 
 /** The first index from `from` (below `end`) where `s` holds `what` outside a backslash escape, or -1. */
 function findUnescaped(s, what, from, end) {
   for (let j = from; j <= end - what.length; j++) {
-    if (s[j] === '\\' && j + 1 < end && ESCAPABLE.has(s[j + 1])) {
+    if (s.charCodeAt(j) === 92 && j + 1 < end && ESCAPABLE[s.charCodeAt(j + 1)] === 1) {
       j++;
       continue;
     }
@@ -374,13 +380,13 @@ function findUnescaped(s, what, from, end) {
 /** The first single * from `from` (below `end`; one whose run is not **), outside an escape, or -1. */
 function findSingleStar(s, from, end) {
   for (let j = from; j < end; j++) {
-    const c = s[j];
-    if (c === '\\' && j + 1 < end && ESCAPABLE.has(s[j + 1])) {
+    const c = s.charCodeAt(j);
+    if (c === 92 && j + 1 < end && ESCAPABLE[s.charCodeAt(j + 1)] === 1) {
       j++;
       continue;
     }
-    if (c !== '*') continue;
-    if (s[j + 1] === '*') {
+    if (c !== 42) continue;
+    if (s.charCodeAt(j + 1) === 42) {
       j++;
       continue;
     }
@@ -408,99 +414,105 @@ function escapeHtmlInto(text, a, b, out) {
   if (b > start) out.push(text.slice(start, b));
 }
 
+const INLINE_SPECIAL = /[\\`*\[&<>"']/g;
+
 /**
  * `s[from..to)` rendered inline, appended to `out` (an array of string chunks).
- * One pass: plain runs are sliced out whole (they hold no escapable character
- * by construction); only code spans, links and the recursive strong/em bodies
- * need escaping or recursion. `env.link(target)` is a link's href.
+ * The next markup character is found with one native regex scan instead of a
+ * per-character JS loop; plain runs are sliced out whole. Only code spans,
+ * links and the recursive strong/em bodies need escaping or recursion.
+ * `env.link(target)` is a link's href.
  */
 function inline(s, env, out, from, to) {
-  let i = from;
   let start = from;
   const n = to;
-  while (i < n) {
-    const c = s.charCodeAt(i);
+  INLINE_SPECIAL.lastIndex = from;
+  let m;
+  while ((m = INLINE_SPECIAL.exec(s)) !== null && m.index < n) {
+    const j = m.index;
+    const c = s.charCodeAt(j);
     if (c === 92) { // backslash
-      if (i + 1 < n && ESCAPABLE.has(s[i + 1])) {
-        if (i > start) out.push(s.slice(start, i));
-        const nx = s[i + 1];
-        out.push(nx === '&' ? '&amp;' : nx === '<' ? '&lt;' : nx === '>' ? '&gt;' : nx === '"' ? '&quot;' : nx === "'" ? '&#39;' : nx);
-        i += 2;
-        start = i;
+      if (j + 1 < n && ESCAPABLE[s.charCodeAt(j + 1)] === 1) {
+        if (j > start) out.push(s.slice(start, j));
+        const nc = s.charCodeAt(j + 1);
+        out.push(nc === 38 ? '&amp;' : nc === 60 ? '&lt;' : nc === 62 ? '&gt;' : nc === 34 ? '&quot;' : nc === 39 ? '&#39;' : s[j + 1]);
+        start = j + 2;
+        INLINE_SPECIAL.lastIndex = start;
       } else {
-        i++;
+        INLINE_SPECIAL.lastIndex = j + 1;
       }
       continue;
     }
+    if (j > start) out.push(s.slice(start, j));
     if (c === 96) { // backtick
-      const j = s.indexOf('`', i + 1);
-      if (j !== -1 && j < n && j > i + 1) {
-        if (i > start) out.push(s.slice(start, i));
+      const k = s.indexOf('`', j + 1);
+      if (k !== -1 && k < n && k > j + 1) {
         out.push('<code>');
-        escapeHtmlInto(s, i + 1, j, out);
+        escapeHtmlInto(s, j + 1, k, out);
         out.push('</code>');
-        i = j + 1;
-        start = i;
+        start = k + 1;
+        INLINE_SPECIAL.lastIndex = start;
       } else {
-        i++;
+        out.push('`');
+        start = j + 1;
+        INLINE_SPECIAL.lastIndex = start;
       }
       continue;
     }
     if (c === 42) { // *
-      if (s.charCodeAt(i + 1) === 42) {
-        const j = findUnescaped(s, '**', i + 2, n);
-        if (j > i + 2) {
-          if (i > start) out.push(s.slice(start, i));
+      if (s.charCodeAt(j + 1) === 42) {
+        const k = findUnescaped(s, '**', j + 2, n);
+        if (k > j + 2) {
           out.push('<strong>');
-          inline(s, env, out, i + 2, j);
+          inline(s, env, out, j + 2, k);
           out.push('</strong>');
-          i = j + 2;
-          start = i;
+          start = k + 2;
+          INLINE_SPECIAL.lastIndex = start;
         } else {
-          i += 2;
+          out.push('**');
+          start = j + 2;
+          INLINE_SPECIAL.lastIndex = start;
         }
         continue;
       }
-      const j = findSingleStar(s, i + 1, n);
-      if (j > i + 1) {
-        if (i > start) out.push(s.slice(start, i));
+      const k = findSingleStar(s, j + 1, n);
+      if (k > j + 1) {
         out.push('<em>');
-        inline(s, env, out, i + 1, j);
+        inline(s, env, out, j + 1, k);
         out.push('</em>');
-        i = j + 1;
-        start = i;
+        start = k + 1;
+        INLINE_SPECIAL.lastIndex = start;
       } else {
-        i++;
+        out.push('*');
+        start = j + 1;
+        INLINE_SPECIAL.lastIndex = start;
       }
       continue;
     }
     if (c === 91) { // [
-      const k = findUnescaped(s, ']', i + 1, n);
-      const m = k !== -1 && s.charCodeAt(k + 1) === 40 ? s.indexOf(')', k + 2) : -1;
-      const target = m === -1 || m >= n ? '' : s.slice(k + 2, m);
+      const k = findUnescaped(s, ']', j + 1, n);
+      const mm = k !== -1 && s.charCodeAt(k + 1) === 40 ? s.indexOf(')', k + 2) : -1;
+      const target = mm === -1 || mm >= n ? '' : s.slice(k + 2, mm);
       if (target !== '' && !HAS_WS.test(target)) {
-        if (i > start) out.push(s.slice(start, i));
         const href = env.link(target);
         out.push('<a href="');
         escapeHtmlInto(href, 0, href.length, out);
         out.push('">');
-        inline(s, env, out, i + 1, k);
+        inline(s, env, out, j + 1, k);
         out.push('</a>');
-        i = m + 1;
-        start = i;
+        start = mm + 1;
+        INLINE_SPECIAL.lastIndex = start;
         continue;
       }
-      i++;
+      out.push('[');
+      start = j + 1;
+      INLINE_SPECIAL.lastIndex = start;
       continue;
     }
-    if (c === 38 || c === 60 || c === 62 || c === 34 || c === 39) {
-      if (i > start) out.push(s.slice(start, i));
-      out.push(c === 38 ? '&amp;' : c === 60 ? '&lt;' : c === 62 ? '&gt;' : c === 34 ? '&quot;' : '&#39;');
-      i++;
-      start = i;
-      continue;
-    }
-    i++;
+    // & < > " '
+    out.push(c === 38 ? '&amp;' : c === 60 ? '&lt;' : c === 62 ? '&gt;' : c === 34 ? '&quot;' : '&#39;');
+    start = j + 1;
+    INLINE_SPECIAL.lastIndex = start;
   }
   if (n > start) out.push(s.slice(start, n));
 }
@@ -808,9 +820,15 @@ function renderNodes(nodes, scope, ctx, depth, out) {
       case 'for': {
         const xs = lookup(scope, n.path);
         if (!Array.isArray(xs)) break;
+        const loop = { index: 1, first: true, last: xs.length === 1, length: xs.length };
+        const vars = { [n.name]: xs[0], loop };
+        const child = { vars, parent: scope };
         for (let k = 0; k < xs.length; k++) {
-          const vars = { [n.name]: xs[k], loop: { index: k + 1, first: k === 0, last: k === xs.length - 1, length: xs.length } };
-          renderNodes(n.body, { vars, parent: scope }, ctx, depth, out);
+          vars[n.name] = xs[k];
+          loop.index = k + 1;
+          loop.first = k === 0;
+          loop.last = k === xs.length - 1;
+          renderNodes(n.body, child, ctx, depth, out);
         }
         break;
       }
@@ -888,7 +906,7 @@ export function build(input) {
   {
     const files = [...b.input.files].sort((x, y) => byCodeUnits(x.path, y.path));
     for (const f of files) {
-      if (f.path.endsWith('.md')) b.sources.push({ path: f.path, text: f.content.replace(CRLF, '\n') });
+      if (f.path.endsWith('.md')) b.sources.push({ path: f.path, text: f.content.indexOf('\r') === -1 ? f.content : f.content.replace(CRLF, '\n') });
       else b.statics.push({ path: f.path, content: f.content });
     }
   }
@@ -1014,7 +1032,14 @@ export function build(input) {
     tags: s.tagRefs.map((t) => ({ name: t.name, slug: t.slug, url: t.url })),
   });
   const pageOf = (s) => ({
-    ...cardOf(s),
+    title: s.data.title,
+    url: s.url,
+    date: s.data.date ?? '',
+    date_long: s.data.date === undefined ? '' : longDate(s.data.date),
+    summary: s.data.summary ?? '',
+    excerpt: s.excerpt,
+    reading_minutes: Math.max(1, Math.ceil((s.words ?? wordsOf(s.body)) / 200)),
+    tags: s.tagRefs.map((t) => ({ name: t.name, slug: t.slug, url: t.url })),
     slug: s.slug,
     content: s.html,
     toc: s.toc.map((h) => ({ level: h.level, id: h.id, html: h.html })),
@@ -1030,11 +1055,12 @@ export function build(input) {
     const allTags = b.tags.map((t) => ({ name: t.name, slug: t.slug, url: t.url, count: t.posts.length }));
     const recent = b.posts.slice(0, b.input.site.recent).map((p) => b.cards.get(p));
     const ctx = { templates: b.templates, escape: escapeHtml };
+    const baseScope = { vars: { site, tags: allTags, recent }, parent: null };
     const render = (name, vars) => {
       const nodes = b.templates.get(name);
       if (nodes === undefined) return null;
       const out = [];
-      renderNodes(nodes, { vars: { site, tags: allTags, recent, ...vars }, parent: null }, ctx, 0, out);
+      renderNodes(nodes, { vars, parent: baseScope }, ctx, 0, out);
       return out.join('');
     };
     for (const s of b.sources) b.output[`${s.outDir}/index.html`] = render(s.layout, { page: pageOf(s) });

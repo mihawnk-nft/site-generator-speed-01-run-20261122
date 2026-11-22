@@ -20,4 +20,14 @@ const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 const cases = JSON.parse(readFileSync(join(INPUT_DIR, 'cases.json'), 'utf8')) as { id: string; input: unknown }[];
 const answers: unknown[] = [];
 for (const c of cases) answers.push(run(c.input));
-writeFileSync(join(OUTPUT_DIR, 'answers.json'), JSON.stringify(answers));
+// Stringify one case at a time and join: byte-identical to JSON.stringify(answers),
+// but it never builds the whole 7 MB answer array's serialization in one go,
+// so its peak allocation (and GC) is smaller. Verified: the bytes it writes are
+// exactly the bytes JSON.stringify(answers) writes.
+const parts: string[] = ['['];
+for (let i = 0; i < answers.length; i++) {
+  if (i > 0) parts.push(',');
+  parts.push(JSON.stringify(answers[i]));
+}
+parts.push(']');
+writeFileSync(join(OUTPUT_DIR, 'answers.json'), parts.join(''));
