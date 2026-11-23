@@ -243,3 +243,44 @@ entry. Sisa optimasi masing-masing ≤1% dan tenggelam dalam noise VM
 ±5%. **Limit praktis ~2,1x net TERKONFIRMASI.** Satu-satunya jalan
 ke 3x+ yang tersisa adalah arsitektur yang berbeda total (bukan
 optimasi incremental) — belum ada kandidat konkretnya.
+
+## Hasil optimasi ronde 4 — 23 Nov 2026 (uji hipotesis Grok: inline() memindai melewati batas paragraf)
+
+Hipotesis Grok (sudah membaca seluruh solve.js): di `inline()`,
+`INLINE_SPECIAL.exec(s)` mencari pada SELURUH sisa string `s`, bukan
+hanya sampai `to`; pengecekan `m.index < n` baru dilakukan SETELAH
+regex menemukan karakter khusus. Paragraf tanpa karakter khusus bisa
+membuat regex memindai sampai paragraf berikutnya — bahkan lebih jauh.
+
+Diagnosis (terukur, bukan dugaan): dari 33.347 panggilan `inline()`
+pada 3 practice case, 10.716 (32%) overshoot batas `to`, total
+overscan ~0,51 MB (rata-rata 15,3 karakter/panggilan); `escapeHtmlInto`
+menambah ~0,26 MB. Mekanismenya BENAR — tapi besarnya kecil: scan
+regex native ~0,5 MB ≈ <1 ms per 3 case (≈ <1% dari build warm
+~131 ms). Scratch: `solve-diag.js`, `diag-overscan.mjs`.
+
+Perbaikan yang diuji: slice paragraf di call site fast-path (baris
+718) — `inline(src,...)` diganti `inline(src.slice(from,to),...,0,len)`
+sehingga SEMUA scan regex/indexOf di dalam `inline` (termasuk
+rekursi strong/em/link dan `escapeHtmlInto`) terbatas pada paragraf.
+Satu alokasi sliced-string per paragraf no-trim (V8 sliced string
+murah, berbagi buffer induk). Scratch: `solve-r4.js`, `bot-r4`,
+`verify-r4.mjs`, `ab-r4.log`.
+
+Verifikasi: grade-local 3/3 PASS (L1 regrade reproduced byte for
+byte); 120 acak + 52 adversarial 0 beda vs oracle.
+
+A/B interleaved vs 22b891e (n=12, 5 batch; 2 batch dibalik urutannya
+untuk mengontrol artefak urutan pengukuran ronde 3): speedup r4 vs
+dev per batch — 0,999x / 1,006x / 1,038x / 0,902x / 1,032x → median
+~1,006x, rata-rata ~0,995x. Batch normal (r4 diukur pertama) rata-rata
+~0,969x; batch terbalik (r4 diukur kedua) rata-rata ~1,035x — selisih
+~3% ≈ artefak urutan yang sama seperti ronde 3 (modul yang diukur
+kedua ~15–22 ms lebih cepat); batch 4 (0,902x) adalah outlier noise
+VM. Estimasi tak-bias ≈ 1,00x. DIBATALKAN — tidak ada peningkatan
+stabil yang terukur; penghematan <1% tenggelam dalam noise ±5% dan
+diimbangi biaya alokasi slice.
+
+KESIMPULAN RONDE 4: hipotesis Grok benar secara mekanisme, salah
+secara besaran. Limit praktis ~2,14x net TETAP TERKONFIRMASI.
+TIDAK ADA commit kode baru — dev tetap di 22b891e (sudah submit).
