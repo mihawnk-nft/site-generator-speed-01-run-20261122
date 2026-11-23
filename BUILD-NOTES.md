@@ -186,3 +186,60 @@ Bottleneck yang bikin mentok (LIMIT):
   dioptimasi berat; sisa optimasi masing-masing <1% dan tenggelam dalam
   noise VM ±5% antar batch.
 - JANGAN submit sebelum lampu hijau user untuk commit baru ini.
+
+## Hasil optimasi ronde 3 — 23 Nov 2026 (uji hipotesis "masih ada ruang besar ke 3x+")
+
+Hipotesis AI eksternal: Markdown/template masih menyimpan ruang besar ke
+2,8–3,5x. Diuji tiga jalur; SEMUANYA tidak terukur lebih cepat. TIDAK ADA
+commit baru — dev tetap di 22b891e (sudah submit sebagai jaring pengaman).
+
+Profil ulang (dikonfirmasi): PH4 Markdown 32,9 ms/case warm (70%), PH7
+template 8,3 ms (18%), PH2 front matter 1,8 ms. CPU profile warm:
+renderNodes 16,7%, renderMarkdown 14,6%, wordsOf 10,3%, inline 10,2%,
+GC 4,9%. Profil cold (fresh process, 3 case sekali jalan): GC 11,9%
+(naik dari 4,9% warm), renderMarkdown 11,9%, build 8,8%, wordsOf 7,8% —
+tidak ada satu spike compile besar; cold excess (~220 ms) tersebar di
+JIT-baseline + IC miss + GC/heap growth, bukan satu bottleneck.
+
+1. **Rewrite renderMarkdown berbasis index** (tanpa `split('\n')` +
+   array `lines`/`starts`; `inline` langsung ke `parts` untuk paragraf
+   non-pertama/headings/list/blockquote; `escapeHtmlInto` untuk fence):
+   - Verifikasi: grade-local 3/3 PASS, 120 acak + 52 adversarial 0 beda
+     vs oracle (scratch: `solve-r3.js`, `bot-r3`, `verify-r3.mjs`).
+   - Warm build sempat terlihat 53,3 → 31,2 ms/case, TAPI itu artefak
+     urutan pengukuran (modul yang diukur kedua selalu ~15–22 ms lebih
+     cepat); dibalik urutannya hasilnya ikut terbalik (46,8 vs 38,8).
+   - End-to-end interleaved A/B vs 22b891e (n=12): net 0,937x dan
+     1,022x — rata-rata ~0,98x, dalam noise ±5%. DIBATALKAN.
+   - Pelajaran: versi lama SUDAH hampir bebas alokasi untuk paragraf
+     (fast path pakai offset `starts[]`); `split` hanya menyisakan
+     array `lines`/`starts` yang murah (sliced string V8 hampir gratis).
+2. **JIT warmup di import** (satu case sintetis 200 source, semua
+   konstruk Markdown + template, hasil dibuang; biaya import 58,3 ms
+   vs 3,2 ms tanpa warmup): end-to-end vs 22b891e net 0,867x dan
+   0,877x — JELAS LEBIH LAMBAT (~13%). Warmup tidak membuat case
+   nyata lebih cepat (hemat ~0 ms) dan biayanya penuh dibayar.
+   DIBATALKAN. Mengonfirmasi temuan ronde 2 (warmup sintetis kecil
+   tidak membantu) — bahkan dengan warmup besar/realistis.
+3. **`wordsOf` table-driven** (`Uint8Array` whitespace, ganti rantai
+   branch): micro-bench 1.070 body (2,77 MB): 15,6–18,3 ms vs
+   16,1 ms versi lama — tidak ada perbaikan. DIBATALKAN. `wordsOf`
+   sudah di floor; fusi ke renderMarkdown juga tidak menghilangkan
+   loop per-karakternya, jadi tidak dicoba lanjut.
+
+Angka final commit 22b891e (5 batch segar, interleaved A/B n=12,
+node v24.22.1, VM shared) vs baseline: net 2,191 / 2,146 / 2,192 /
+2,106 / 2,083 → **median 2,146x, rentang 2,08–2,19x, rata-rata
+~2,14x** (konsisten dengan median ronde 2: 2,138x). Batch terbaik
+hari ini 2,192x (2,38x ronde 2 adalah batch puncak sekali waktu,
+bukan angka stabil).
+
+KESIMPULAN RONDE 3: hipotesis "ruang besar ke 3x+" TIDAK TERBUKTI.
+Untuk 3x net, entry gross harus ~550 ms (dari ~680 ms) — potong
+~130 ms — sementara build dingin (~360 ms) sudah dekat floor warm
+(~140 ms) dan biaya tetap (null ~200 ms, JSON parse ~55 ms,
+stringify ~65 ms, import ~13 ms) tidak bisa dipangkas dari sisi
+entry. Sisa optimasi masing-masing ≤1% dan tenggelam dalam noise VM
+±5%. **Limit praktis ~2,1x net TERKONFIRMASI.** Satu-satunya jalan
+ke 3x+ yang tersisa adalah arsitektur yang berbeda total (bukan
+optimasi incremental) — belum ada kandidat konkretnya.
